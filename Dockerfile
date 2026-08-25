@@ -355,3 +355,28 @@ COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["claude"]
+
+# Attach configuration for an IDE that connects to a *running* container (VS
+# Code's "Attach to Running Container" and anything else honouring the
+# devcontainer spec). `docker exec` never runs ENTRYPOINT, so an attach does
+# not inherit the runuser drop above and would otherwise land as container
+# root — which by then cannot write /root: entrypoint.sh has chowned it to
+# HOST_UID, and with --cap-drop ALL container root holds DAC_READ_SEARCH but
+# not DAC_OVERRIDE. The symptom is a bare `mkdir: Permission denied` partway
+# through the IDE server install. `claude` is the account entrypoint.sh
+# creates at runtime with -u "$HOST_UID", so naming it here makes the attach
+# run as the same UID as the agent; the IDE lockfile it writes under
+# /root/.claude/ide is then readable by claude itself. The extension entry
+# installs into the container rather than the user's local editor, which is
+# where it would otherwise land — useless to an in-container agent.
+#
+# Not a build-time user: see the "Do not add a `USER` directive" note above.
+# HOST_UID=0 is an exception — entrypoint.sh returns before creating
+# `claude`, so remoteUser cannot resolve. Attaching as root is correct there
+# (/root is never chowned away from root); the README documents the override.
+# So is a HOST_UID that already has a passwd entry in the image: useradd is
+# skipped, and the override names that existing same-UID account instead.
+# workspaceFolder is deliberately absent: WORKDIR above is already the one
+# folder correct for every session, and an image-scoped label must not pin
+# a single repo.
+LABEL devcontainer.metadata='[{"remoteUser":"claude","customizations":{"vscode":{"extensions":["anthropic.claude-code"]}}}]'

@@ -540,15 +540,28 @@ stage_root="$HOME/.cache/claude-docker"
 mkdir -p "$stage_root"
 stage=$(mktemp -d "$stage_root/host.XXXXXX")
 
-# GitHub auth-proxy sidecar session identity, derived from the stage-dir
-# suffix so it's already unique (mktemp did the work) with no extra
-# bookkeeping. Named here — immediately after the stage dir exists but
-# before ANY docker resource is created — purely so the EXIT trap below can
-# be extended before there is anything for it to clean up. Actual sidecar
+# Per-session identity, derived from the stage-dir suffix so it's already
+# unique (mktemp did the work) with no extra bookkeeping. The gh-auth-proxy
+# names are built here — immediately after the stage dir exists but before
+# ANY docker resource is created — purely so the EXIT trap below can be
+# extended before there is anything for it to clean up. Actual sidecar
 # creation (gated on --gh finding a host token) happens further down.
-gh_sid="${stage##*.}"
-GH_PROXY_NETWORK="claude-gh-$gh_sid"
-GH_PROXY_SIDECAR="claude-gh-proxy-$gh_sid"
+session_sid="${stage##*.}"
+GH_PROXY_NETWORK="claude-gh-$session_sid"
+GH_PROXY_SIDECAR="claude-gh-proxy-$session_sid"
+
+# Name the agent container after its first workspace so it's greppable
+# (`docker ps --filter name=claude-docker-`) and self-describing in an IDE's
+# attach picker, instead of a random docker-assigned name. The session suffix
+# keeps concurrent sessions — including two on the same workspace — from
+# colliding; --rm releases the name on exit. Docker allows only
+# [a-zA-Z0-9][a-zA-Z0-9_.-]* in a name, and a basename is arbitrary, so
+# squash anything else to '-' and prefix a leading non-alphanumeric. Not
+# announced at startup: attaching is rare enough that a line on every run
+# would be noise. See README § Attaching an IDE.
+agent_ws=$(printf '%s' "${SEEN_NAMES[0]}" | LC_ALL=C tr -c '[:alnum:]_.-' '-')
+case "$agent_ws" in [!a-zA-Z0-9]*) agent_ws="ws$agent_ws" ;; esac
+AGENT_CONTAINER="claude-docker-$agent_ws-$session_sid"
 
 # `case` instead of `[[ ]]` for bash 3.2 friendliness inside the trap string.
 # $HOME/$RUNTIME/$GH_PROXY_* are expanded at trap execution time, * is a glob
@@ -885,6 +898,7 @@ fi
 # --init wraps the process tree under tini so claude's bash/MCP children
 # get reaped — runuser would otherwise be PID 1 and wouldn't reap zombies.
 "$RUNTIME" run --rm -it --init \
+  --name "$AGENT_CONTAINER" \
   --security-opt no-new-privileges \
   --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_READ_SEARCH \
   -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
