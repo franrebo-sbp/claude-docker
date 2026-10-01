@@ -42,8 +42,9 @@ Host credentials (files or env vars) SHALL NOT reach the container unless the us
   distinguishes it from proxied `gh`.
 - `--glab`: mount the platform-appropriate glab config dir — `~/Library/Application Support/glab-cli` on macOS, `~/.config/glab-cli` on Linux — at `/root/.config/glab-cli:ro`; forward `GITLAB_TOKEN` when set on the host.
 - `--tfe`: when present on the host, mount `~/.terraform.d/credentials.tfrc.json` at `/root/.terraform.d/credentials.tfrc.json:ro`; forward `TF_TOKEN_app_terraform_io` when set on the host. Targets `app.terraform.io` (HCP Terraform); self-hosted Terraform Enterprise hostnames and other `TF_TOKEN_<host>` variables are out of scope for this opt-in.
+- `--az`: forward `AZURE_DEVOPS_EXT_PAT` and `AZURE_DEVOPS_ORG_URL` when set on the host, and SHALL NOT mount any host `~/.azure` file: the PAT is the whole credential, and the profile would only carry tenant / subscription IDs and the account name into the container. `AZURE_DEVOPS_ORG_URL` SHALL be the only source of the Azure DevOps hostname — nothing SHALL assume `dev.azure.com`, so Azure DevOps Server (on-prem, custom hostname) works the same as Services. `run.sh` SHALL NOT attempt host-side PAT discovery (`az` has no command that prints a usable PAT). When `CLAUDE_DOCKER_AZ_CA` is set on the host, `run.sh` SHALL mount the file it names read-only at `/usr/local/share/ca-certificates/claude-docker-az.crt`, the entrypoint SHALL install it into the system trust store before the privilege drop, and `az` SHALL use the system bundle; the host value itself SHALL NOT be forwarded. When it is set but does not name a file, `run.sh` SHALL exit 1 before starting any container. The host's `REQUESTS_CA_BUNDLE` SHALL NOT be read, since it is often set for unrelated reasons. The certificate is trusted for every TLS connection in the container, not only the Azure DevOps Server; the documentation SHALL say so. Targets the `azure-devops` extension only; general Azure resource management and its credentials (`ARM_*`, `AZURE_CLIENT_SECRET`, service principals) are out of scope for this opt-in.
 
-All credential bind-mounts SHALL be read-only so a compromised container cannot rewrite host config or tokens. `~/.aws/credentials` and `~/.aws/cli/cache/` SHALL NEVER be mounted, even under `--aws`.
+All credential bind-mounts SHALL be read-only so a compromised container cannot rewrite host config or tokens. `~/.aws/credentials` and `~/.aws/cli/cache/` SHALL NEVER be mounted, even under `--aws`. Likewise nothing under `~/.azure/` SHALL be mounted under `--az` — in particular never the Azure token caches `msal_token_cache.json` or `accessTokens.json`.
 
 The container's own `/root/.aws/cli/cache/` SHALL NOT survive the session that
 wrote it. The AWS CLI caches assume-role and SSO-derived STS credentials there,
@@ -62,6 +63,7 @@ copied in from the host or derived inside the container.
 - **AND** `/root/.terraform.d/` is empty inside the container
 - **AND** `echo $GH_TOKEN` inside the container is empty
 - **AND** `echo $TF_TOKEN_app_terraform_io` inside the container is empty
+- **AND** `/root/.azure/` is empty inside the container and `echo $AZURE_DEVOPS_EXT_PAT` is empty
 - **AND** `gh auth status` inside the container reports "not logged in"
 
 #### Scenario: --aws grants scoped AWS access
@@ -137,9 +139,42 @@ copied in from the host or derived inside the container.
 - **AND** `/root/.terraform.d/` inside the container is empty
 - **AND** `echo $TF_TOKEN_app_terraform_io` inside the container is empty
 
+#### Scenario: --az forwards the PAT and the org URL
+
+- **GIVEN** `AZURE_DEVOPS_EXT_PAT=pat_x` and `AZURE_DEVOPS_ORG_URL=https://devops.example.com/DefaultCollection` are exported in the host shell
+- **WHEN** user runs `claude-docker --az ~/repo`
+- **THEN** both variables are set inside the container with the host's values
+- **AND** `az devops project list` inside the container targets `https://devops.example.com/DefaultCollection` without an `--org` argument
+
+#### Scenario: --az mounts only the non-secret az config
+
+- **GIVEN** the host has `~/.azure/azureProfile.json`, `~/.azure/clouds.config` and `~/.azure/msal_token_cache.json`
+- **WHEN** user runs `claude-docker --az ~/repo`
+- **THEN** none of those files is present under `/root/.azure` inside the container
+- **AND** `AZURE_DEVOPS_EXT_PAT` carries the host's value
+
+#### Scenario: --az trusts the host REQUESTS_CA_BUNDLE
+
+- **GIVEN** the host exports `CLAUDE_DOCKER_AZ_CA=~/.azure/tfs-ca.pem` naming a PEM CA certificate
+- **WHEN** user runs `claude-docker --az ~/repo`
+- **THEN** the certificate is present in `/etc/ssl/certs/ca-certificates.crt` inside the container
+- **AND** `az` resolves `REQUESTS_CA_BUNDLE` to `/etc/ssl/certs/ca-certificates.crt`, not the host path
+
+#### Scenario: --az ignores the host REQUESTS_CA_BUNDLE
+
+- **GIVEN** the host exports `REQUESTS_CA_BUNDLE` naming a PEM file and does not set `CLAUDE_DOCKER_AZ_CA`
+- **WHEN** user runs `claude-docker --az ~/repo`
+- **THEN** no file is mounted at `/usr/local/share/ca-certificates/claude-docker-az.crt`
+
+#### Scenario: --az with a missing REQUESTS_CA_BUNDLE fails loudly
+
+- **GIVEN** the host exports `CLAUDE_DOCKER_AZ_CA=/nonexistent.pem`
+- **WHEN** user runs `claude-docker --az ~/repo`
+- **THEN** `run.sh` exits 1 with an error naming the path and starts no container
+
 ### Requirement: In-container gh login persists only under --gh
 
-Because macOS `gh` uses the Keychain (no host file to mount), the container SHALL support a fresh `gh auth login` whose resulting `~/.config/gh/` persists across runs via the existing `claude-code-root` volume. Access to that persisted state SHALL be gated on the current run actually needing it: `/root/.config/gh/` inside the container MUST appear empty (achieved by overlaying a tmpfs mask) unless the run is `--gh` with no host token found (in-container login is the remaining auth path) or `--gh-direct`. In particular, the mask SHALL stay ON when the auth proxy sidecar is active — the placeholder env token makes persisted login state unnecessary, and leaving it accessible would reintroduce a persisted in-container secret. When `--gh` is absent entirely, the mask applies as before. The same masking rule SHALL apply to `/root/.config/glab-cli/` when `--glab` is not set, and to `/root/.terraform.d/` when `--tfe` is not set (covering tokens written by an in-container `terraform login` that would otherwise persist via `claude-code-root`).
+Because macOS `gh` uses the Keychain (no host file to mount), the container SHALL support a fresh `gh auth login` whose resulting `~/.config/gh/` persists across runs via the existing `claude-code-root` volume. Access to that persisted state SHALL be gated on the current run actually needing it: `/root/.config/gh/` inside the container MUST appear empty (achieved by overlaying a tmpfs mask) unless the run is `--gh` with no host token found (in-container login is the remaining auth path) or `--gh-direct`. In particular, the mask SHALL stay ON when the auth proxy sidecar is active — the placeholder env token makes persisted login state unnecessary, and leaving it accessible would reintroduce a persisted in-container secret. When `--gh` is absent entirely, the mask applies as before. The same masking rule SHALL apply to `/root/.config/glab-cli/` when `--glab` is not set, to `/root/.terraform.d/` when `--tfe` is not set (covering tokens written by an in-container `terraform login` that would otherwise persist via `claude-code-root`), and to `/root/.azure/` when `--az` is not set (covering `az devops configure` state and command logs naming organizations and projects).
 
 The rule SHALL extend to `/root/.aws/` when `--aws` is not set. AWS has no
 in-container `auth login` step, so it was omitted when this requirement was
@@ -203,6 +238,12 @@ the user no way to tell which.
 - **WHEN** user runs `claude-docker --aws ~/repo` and the AWS CLI derives and caches STS credentials
 - **THEN** `/root/.aws/config` is readable inside that container
 - **AND** on the next `claude-docker --aws ~/repo`, `/root/.aws/cli/cache/` is empty at session start
+
+#### Scenario: prior az state is hidden without --az
+
+- **GIVEN** a prior container run used `--az` and ran `az devops configure --defaults project=X` (state persisted under `/root/.azure/` in `claude-code-root`)
+- **WHEN** user runs `claude-docker ~/repo` without `--az`
+- **THEN** `/root/.azure/` inside the container is empty
 
 ### Requirement: git-lfs installed and LFS filters registered
 
@@ -314,3 +355,25 @@ Bedrock, Vertex, and Foundry provider selection (`CLAUDE_CODE_USE_BEDROCK`, `CLA
 - **WHEN** user runs `claude-docker --api ~/repo`
 - **THEN** both knobs carry the host values inside the container
 - **AND** without `--api` neither is set inside the container
+
+### Requirement: az with the azure-devops extension installed
+
+The container image SHALL ship an `az` command on the default PATH that runs the `azure-devops` extension (`az devops`, `az repos`, `az boards`, `az pipelines`) on both `amd64` and `arm64`. It SHALL be built from `azure-cli-core` plus the extension, not the full `azure-cli` distribution. `azure-cli-core` SHALL be version-pinned via `pins/az.env`, and it and every transitive dependency SHALL be installed with `--require-hashes` from the hash-locked `pins/az-requirements.txt`; the build SHALL fail if the lock does not pin the `pins/az.env` version. the extension SHALL be installed from the wheel URL recorded in `pins/azure-devops.env` after verifying it against the sha256 recorded there, not via the unpinned extension index. The Python runtime and all az files SHALL live outside `/root` and SHALL NOT add a `python` / `python3` to the default PATH. The build SHALL fail if the extension does not load. The `az` wrapper SHALL set `AZURE_CORE_COLLECT_TELEMETRY=no`.
+
+#### Scenario: az devops present
+
+- **WHEN** the container launches
+- **THEN** `az --version` reports the pinned `azure-cli-core` version and the pinned `azure-devops` extension version
+- **AND** `az devops -h` succeeds
+
+#### Scenario: build fails on a tampered extension wheel
+
+- **GIVEN** a build where the downloaded wheel does not match `AZURE_DEVOPS_SHA256`
+- **WHEN** the Dockerfile runs `sha256sum -c`
+- **THEN** the build fails before anything is installed
+
+#### Scenario: az deps are hash-locked
+
+- **GIVEN** `pins/az-requirements.txt` lists a dependency without a `--hash`, or pins an `azure-cli-core` version other than `pins/az.env`'s
+- **WHEN** the image is built
+- **THEN** the build fails

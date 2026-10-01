@@ -7,7 +7,7 @@
 #   exec runuser -u claude -- /workspaces/smoke/assert-in-container.sh
 # Reads expectations from env vars set by smoke.sh:
 #   EXPECT_UID        expected numeric UID (matches HOST_UID forwarded by smoke.sh)
-#   EXPECT_OPTINS     comma-separated list of granted opt-ins (aws glab tfe api), or empty
+#   EXPECT_OPTINS     comma-separated list of granted opt-ins (aws glab tfe api az), or empty
 #   WORKSPACE         path to the bind-mounted workspace inside the container
 #   EXPECT_RO         1 = workspace is :ro (skip write probe, only test entrypoint startup)
 #   EXPECT_SETTINGS   1 = a settings fixture was mounted at the seed path; assert the
@@ -284,12 +284,13 @@ optin_config_path() {
     aws)  echo "/root/.aws/config:AWS_PROFILE" ;;
     glab) echo "/root/.config/glab-cli:GITLAB_TOKEN" ;;
     tfe)  echo "/root/.terraform.d/credentials.tfrc.json:TF_TOKEN_app_terraform_io" ;;
+    az)   echo "/root/.azure:AZURE_DEVOPS_EXT_PAT" ;;
     *)    echo "" ;;
   esac
 }
 
 # All known opt-ins in declaration order.
-ALL_OPTINS="aws glab tfe"
+ALL_OPTINS="aws glab tfe az"
 
 check_credentials() {
   local granted_csv="${EXPECT_OPTINS:-}"
@@ -314,7 +315,14 @@ check_credentials() {
       done
     fi
 
-    if [ "$granted" = "1" ]; then
+    if [ "$granted" = "1" ] && [ "$optin" = "az" ]; then
+      # --az mounts no host file (/root/.azure is plain volume state), so the
+      # forwarded PAT is the fixture: it must be OUR sentinel.
+      case "${AZURE_DEVOPS_EXT_PAT:-}" in
+        *SMOKE-SENTINEL*) pass "optin-az-env: AZURE_DEVOPS_EXT_PAT carries the smoke sentinel" ;;
+        *)                fail "optin-az-env: AZURE_DEVOPS_EXT_PAT missing or not the smoke fixture" ;;
+      esac
+    elif [ "$granted" = "1" ]; then
       # Config path must exist and be read-only (mounted :ro by smoke.sh).
       if [ -e "$config_path" ]; then
         pass "optin-${optin}: config path exists: $config_path"

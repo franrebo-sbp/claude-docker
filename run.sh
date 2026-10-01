@@ -68,6 +68,13 @@ Wrapper flags:
                       ~/.terraform.d/credentials.tfrc.json (:ro) when
                       present and forward TF_TOKEN_app_terraform_io;
                       unmask in-container `terraform login` state.
+  --az                Opt in to Azure DevOps (Services or on-prem Server):
+                      forward AZURE_DEVOPS_EXT_PAT (the PAT) and
+                      AZURE_DEVOPS_ORG_URL (default org, and so the host) when
+                      set; unmask in-container ~/.azure state. Mounts no
+                      host ~/.azure file (no profile, no token caches). Covers
+                      az devops / repos / boards / pipelines only.
+                      Optional private CA via CLAUDE_DOCKER_AZ_CA.
   --registry          Opt in to private package registries: surface host-
                       native uv/npm/pnpm/pip config so in-container installs
                       resolve against a private feed. Mounts ~/.npmrc,
@@ -120,6 +127,9 @@ Environment:
   CLAUDE_DOCKER_API_CA     Path to a PEM CA certificate for the --api endpoint;
                            installed into the container's trust store. Ignored
                            without --api.
+  CLAUDE_DOCKER_AZ_CA      Path to a PEM CA certificate for an on-prem Azure
+                           DevOps Server; installed into the container's trust
+                           store, so trusted for all TLS. Ignored without --az.
 
 Credentials are off by default; combine opt-ins as needed:
   claude-docker --aws --gh ~/repo
@@ -147,6 +157,7 @@ WITH_GH=0
 WITH_GH_DIRECT=0
 WITH_GLAB=0
 WITH_TFE=0
+WITH_AZ=0
 WITH_REGISTRY=0
 WITH_API=0
 CLAUDE_CONFIG_DIR="${CLAUDE_DOCKER_CONFIG_DIR:-$HOME/.claude}"
@@ -166,6 +177,7 @@ for arg in "$@"; do
     --gh-direct)    WITH_GH_DIRECT=1 ;;
     --glab)         WITH_GLAB=1 ;;
     --tfe)          WITH_TFE=1 ;;
+    --az)           WITH_AZ=1 ;;
     --registry)     WITH_REGISTRY=1 ;;
     --api)          WITH_API=1 ;;
     --iterm)        CLAUDE_DOCKER_TMUX=cc ;;
@@ -191,6 +203,16 @@ fi
 # failed `$(helper)` / `op read` stops here too.
 if [ "$WITH_API" = "1" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   echo "claude-docker: --api needs ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY set (non-empty); without one, Claude Code sends your claude.ai OAuth token to the gateway" >&2
+  exit 1
+fi
+
+# --az private CA, e.g. for an on-prem Azure DevOps Server. Its own variable, not
+# the host's REQUESTS_CA_BUNDLE, since that is often set for unrelated reasons
+# and this CA ends up trusted for all TLS in the container. It is mounted and
+# installed below rather than forwarded. A set-but-missing path is fatal:
+# skipping it would fail later at the first TLS handshake.
+if [ "$WITH_AZ" = "1" ] && [ -n "${CLAUDE_DOCKER_AZ_CA:-}" ] && [ ! -f "$CLAUDE_DOCKER_AZ_CA" ]; then
+  echo "claude-docker: CLAUDE_DOCKER_AZ_CA '$CLAUDE_DOCKER_AZ_CA' is not a file" >&2
   exit 1
 fi
 
@@ -433,6 +455,16 @@ if [ "$WITH_TFE" = "1" ]; then
     && MOUNT_ARGS+=("-v" "$(hostpath "$HOME/.terraform.d/credentials.tfrc.json"):/root/.terraform.d/credentials.tfrc.json:ro")
 fi
 
+# Azure DevOps: no host ~/.azure file is mounted. Auth is the PAT in
+# AZURE_DEVOPS_EXT_PAT and the host is whatever AZURE_DEVOPS_ORG_URL names
+# (Services or an on-prem Server); azureProfile.json would only carry tenant /
+# subscription IDs and the account name in, and the AAD token caches never are.
+if [ "$WITH_AZ" = "1" ]; then
+  # Installed by the entrypoint's update-ca-certificates step (claude-docker-*.crt),
+  # so git/curl trust it too; the az wrapper points requests at the system bundle.
+  [ -n "${CLAUDE_DOCKER_AZ_CA:-}" ] && MOUNT_ARGS+=("-v" "$(hostpath "$CLAUDE_DOCKER_AZ_CA"):/usr/local/share/ca-certificates/claude-docker-az.crt:ro")
+fi
+
 # Private package registries: surface the host's native uv/npm/pnpm/pip registry
 # config read-only so in-container installs resolve against a private feed
 # (CodeArtifact / Artifactory / Nexus / …). Each mount is a silent no-op when the
@@ -481,6 +513,7 @@ ENV_VARS=()
 [ "$WITH_GLAB" = "1" ] && ENV_VARS+=(GITLAB_TOKEN)
 [ "$WITH_AWS" = "1" ]  && ENV_VARS+=(AWS_PROFILE AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN)
 [ "$WITH_TFE" = "1" ]  && ENV_VARS+=(TF_TOKEN_app_terraform_io)
+[ "$WITH_AZ" = "1" ]   && ENV_VARS+=(AZURE_DEVOPS_EXT_PAT AZURE_DEVOPS_ORG_URL)
 # --registry: forward the native registry-config env vars uv/npm/pnpm/pip read.
 # Static, fixed-name vars here; uv's dynamic per-index credential vars (whose
 # names embed a user-chosen index name) are handled by the scan below.
@@ -562,6 +595,7 @@ DOCKER_FLAGS=()
 [ "$WITH_AWS" = "1" ]      && DOCKER_FLAGS+=("aws")
 [ "$WITH_GLAB" = "1" ]     && DOCKER_FLAGS+=("glab")
 [ "$WITH_TFE" = "1" ]      && DOCKER_FLAGS+=("tfe")
+[ "$WITH_AZ" = "1" ]       && DOCKER_FLAGS+=("az")
 [ "$WITH_REGISTRY" = "1" ] && DOCKER_FLAGS+=("registry")
 [ "$WITH_API" = "1" ]      && DOCKER_FLAGS+=("api")
 [ "$EPHEMERAL" = "1" ]     && DOCKER_FLAGS+=("ephemeral")
@@ -906,6 +940,7 @@ if [ "$EPHEMERAL" = "0" ]; then
   [ "$gh_config_unmask" = "0" ] && MOUNT_ARGS+=("--tmpfs" "/root/.config/gh")
   [ "$WITH_GLAB" = "0" ] && MOUNT_ARGS+=("--tmpfs" "/root/.config/glab-cli")
   [ "$WITH_TFE" = "0" ]  && MOUNT_ARGS+=("--tmpfs" "/root/.terraform.d")
+  [ "$WITH_AZ" = "0" ]   && MOUNT_ARGS+=("--tmpfs" "/root/.azure")
   # AWS has no in-container `login` step to preserve, so unlike gh it needs no
   # unmask state — the mask is on in both directions, only its scope changes.
   # Without --aws the whole directory is masked. With it, just the credential
