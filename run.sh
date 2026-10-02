@@ -822,19 +822,22 @@ fi
 # path that prefixes a `docker:<flags>` tag when CLAUDE_DOCKER_FLAGS is set.
 # The wrapper is a no-op passthrough when unset so non-claude-docker runs of
 # the same file would behave identically.
-# The host script is exec'd directly when executable so its shebang picks the
-# interpreter, as it does on the host. Never `sh script`: /bin/sh is dash in
-# the image, and a bash statusline dies there with "Bad substitution". A
-# non-executable script falls back to bash, which also runs POSIX sh scripts.
+# The host script is exec'd directly so its shebang picks the interpreter, as
+# it does on the host. Never `sh script`: /bin/sh is dash in the image, and a
+# bash statusline dies there with "Bad substitution". The exec result, not
+# `[ -x ]`, decides the fallback: on Docker Desktop's virtiofs mounts `-x`
+# reports true for a 0644 file whose exec then fails. Exit 126 (not
+# executable) or 127 (shebang interpreter missing, e.g. #!/opt/homebrew/...)
+# re-runs it under bash, which also runs POSIX sh scripts. Any other exit
+# status keeps the script's output and does not re-run it.
 if [ -f "$CLAUDE_CONFIG_DIR/statusline-command.sh" ]; then
   cat >"$stage/statusline-command.sh" <<'WRAP'
 #!/bin/sh
 # claude-docker wrapper — prepends active opt-in flag tag to host statusline.
 orig=/root/.claude/statusline-command.original.sh
 input=$(cat)
-if [ -x "$orig" ]; then
-  body=$(printf '%s' "$input" | "$orig")
-else
+body=$(printf '%s' "$input" | "$orig" 2>/dev/null); rc=$?
+if [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
   body=$(printf '%s' "$input" | bash "$orig")
 fi
 if [ -n "${CLAUDE_DOCKER_FLAGS:-}" ]; then
