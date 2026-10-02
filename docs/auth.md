@@ -48,6 +48,21 @@ When a token is found:
 - SSH remotes (`git@github.com`) remain unsupported, as before — `--gh` never mounted a key or agent. The failure mode changes from an auth prompt to connection-refused, since `git@github.com` now resolves to the sidecar on a port it doesn't serve.
 - git-LFS is expected to work unchanged: the batch endpoint on `github.com` gets the same `Authorization` injection as any other git smart-HTTP request, and the actual object transfer happens against pre-signed, non-intercepted hosts. It's covered by the [manual checklist](maintenance.md#manual-fallback-checklist-macos) rather than called out as a limitation.
 
+## GitLab token discovery (`--glab`)
+
+`glab auth login` on the host is enough; you don't have to export anything:
+
+```bash
+glab auth login --hostname gitlab.example.com   # one-time, on the host
+GITLAB_HOST=gitlab.example.com claude-docker --glab ~/repo
+```
+
+If `GITLAB_TOKEN` is unset, the wrapper runs `glab config get token --host <host>` on the host, where `<host>` is glab's default host: `GITLAB_HOST`, else the `host:` key in glab's `config.yml`, else `gitlab.com`. The token is forwarded as `GITLAB_TOKEN` by name, never on the `docker run` command line. `GITLAB_HOST` is forwarded too when set.
+
+This is what makes keyring logins work. When glab keeps the token in the OS keyring (`use_keyring: true` for the host, no `token:` in `config.yml`), the read-only `glab-cli` mount carries no token, but `glab config get token --host` reads it from the keyring (glab's `internal/config/config.go`, `GetWithSource`; checked against glab 1.118.0 and 1.119.0). Without `--host` glab never consults per-host tokens, so the wrapper always passes it.
+
+An exported `GITLAB_TOKEN` always wins. If `glab` isn't installed or has no token for that host, the container starts without one and no error is shown. Only the default host's token is discovered; for a second instance, export its `GITLAB_TOKEN` and `GITLAB_HOST` yourself.
+
 ## Terraform Cloud workflow
 
 Standard usage targets `app.terraform.io` (HCP Terraform):
