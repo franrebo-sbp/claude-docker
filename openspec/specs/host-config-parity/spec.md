@@ -115,7 +115,7 @@ The image SHALL set `IS_SANDBOX=1` so `claude --dangerously-skip-permissions` (a
 
 ### Requirement: Ghostty terminal type resolves in the container
 
-The image SHALL resolve `TERM=xterm-ghostty`, the value Ghostty sets and `run.sh` forwards, to a terminfo entry. The entry SHALL come from the image's `ncurses-term` package: when that package does not provide `xterm-ghostty` itself, the build SHALL alias it to the package's `ghostty` entry. The build SHALL fail if `infocmp xterm-ghostty` does not resolve.
+The image SHALL resolve `TERM=xterm-ghostty`, the value Ghostty sets and `run.sh` forwards, to a terminfo entry. The entry SHALL come from the image's `ncurses-term` package: the build SHALL alias `xterm-ghostty` to the package's `ghostty` entry. The build SHALL fail if `infocmp xterm-ghostty` does not resolve.
 
 #### Scenario: ncurses programs recognise Ghostty
 
@@ -126,5 +126,5 @@ The image SHALL resolve `TERM=xterm-ghostty`, the value Ghostty sets and `run.sh
 #### Scenario: Entry comes from the image's package
 
 - **WHEN** a reader inspects how the image provides `xterm-ghostty`
-- **THEN** it is either shipped by `ncurses-term` or a link to that package's `ghostty` entry
+- **THEN** it is a link to the `ghostty` entry shipped by `ncurses-term`
 - **AND** no terminfo source is downloaded or vendored into the repository

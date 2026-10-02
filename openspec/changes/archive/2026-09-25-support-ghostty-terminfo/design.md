@@ -12,9 +12,9 @@ The two entries agree on the standard capabilities. They differ mainly in extens
 
 Alternative considered: commit Ghostty's own entry (`infocmp -x xterm-ghostty` output) and compile it with `tic -x` at build time. That gives exact capabilities, but it means reviewing and refreshing a vendored file produced on a maintainer's machine, while the alias uses bytes from the signed Ubuntu package. Rejected for now. Revisit if tmux inside the container needs one of the extensions.
 
-### Decision: Guard the alias and assert the lookup
+### Decision: Link unconditionally and assert the lookup
 
-A later `ncurses-term` may ship `xterm-ghostty` itself. The build creates the link only when the name is absent, then runs `infocmp xterm-ghostty`, so an unexpected layout fails the build instead of shipping an image that silently lacks the entry.
+The build always links the name (`ln -sfn`), then runs `infocmp xterm-ghostty`, so an unexpected layout fails the build instead of shipping an image that silently lacks the entry. If a later `ncurses-term` ships `xterm-ghostty` itself, the link replaces it with the same maintainers' `ghostty` entry. Keeping a packaged entry is not worth a conditional for a case that does not exist yet.
 
 ### Decision: A late, separate layer
 

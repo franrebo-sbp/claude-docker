@@ -351,13 +351,10 @@ EOF
 # Ghostty's entry only as `ghostty` (Debian's build has no xterm-ghostty
 # alias), so tput, less and tmux would fail to look up the terminal. Link
 # the name to the packaged entry rather than vendoring Ghostty's own
-# terminfo: the bytes stay those of the signed Ubuntu package. Skipped if a
-# later ncurses-term ships the name itself; infocmp fails the build if the
-# lookup still doesn't resolve. Late layer so it doesn't invalidate the
-# downloads above.
-RUN if [ ! -e /usr/share/terminfo/x/xterm-ghostty ]; then \
-      ln -s ../g/ghostty /usr/share/terminfo/x/xterm-ghostty; \
-    fi \
+# terminfo: the bytes stay those of the signed Ubuntu package. infocmp fails
+# the build if the lookup doesn't resolve. Late layer so it doesn't
+# invalidate the downloads above.
+RUN ln -sfn ../g/ghostty /usr/share/terminfo/x/xterm-ghostty \
  && infocmp xterm-ghostty >/dev/null
 
 # Go environment. Spelled with a literal /root rather than ${HOME}: Docker does

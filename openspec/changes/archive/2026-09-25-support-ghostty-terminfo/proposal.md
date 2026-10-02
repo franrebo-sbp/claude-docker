@@ -5,7 +5,7 @@ Ghostty sets `TERM=xterm-ghostty`, and `run.sh` forwards `TERM` into the contain
 ## What Changes
 
 - Add `xterm-ghostty` to the image's terminfo database as an alias of the `ghostty` entry that `ncurses-term` already installs. Nothing is downloaded or vendored.
-- Skip the alias if a future `ncurses-term` ships `xterm-ghostty` itself, and fail the build if `infocmp xterm-ghostty` does not resolve.
+- Fail the build if `infocmp xterm-ghostty` does not resolve.
 
 Not in scope: a general fallback for other terminals whose entries the image lacks. Other common emulators (`xterm-kitty`, `alacritty`, `wezterm`, `foot`) are already in `ncurses-term` under the name they set.
 

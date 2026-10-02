@@ -1,6 +1,6 @@
 ## 1. Implementation
 
-- [x] 1.1 Add a `RUN` after the tmux configuration that links `/usr/share/terminfo/x/xterm-ghostty` to `../g/ghostty` when absent, then runs `infocmp xterm-ghostty`.
+- [x] 1.1 Add a `RUN` after the tmux configuration that links `/usr/share/terminfo/x/xterm-ghostty` to `../g/ghostty`, then runs `infocmp xterm-ghostty`.
 
 ## 2. Documentation
 
