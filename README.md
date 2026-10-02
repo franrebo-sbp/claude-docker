@@ -127,8 +127,13 @@ On every run, these items are dereferenced (symlinks resolved) and bind-mounted 
 | `~/.claude/agents/`               | custom agent definitions      |
 | `~/.claude/skills/`               | custom skills                 |
 | `~/.claude/commands/`             | slash commands                |
+| `~/.claude/themes/`               | custom themes                 |
 | `~/.claude/CLAUDE.md`             | global preferences (`gprefs`) |
 | `~/.claude/statusline-command.sh` | statusline renderer           |
+
+The mounts are read-only. For `themes/` that means you can select a custom theme in the container, but saving one from the `/theme` editor fails with "theme save failed": edit themes on the host and they apply on the next start.
+
+`TERM` and `COLORTERM` are forwarded from the host terminal, so Claude Code renders in truecolor when the host does. Without `COLORTERM` it drops to 256 colours and custom theme colours come out rounded. Ghostty's `TERM=xterm-ghostty` resolves to the `ghostty` terminfo entry from Ubuntu's `ncurses-term`, so `tput`, `less` and `--tmux` recognise the terminal.
 
 For `settings.json`, maintain a dedicated `~/.claude/settings.docker.json` (any valid Claude `settings.json` schema) — when present it's copied to `/root/.claude/settings.json` at container start. A copy rather than a bind mount, because Claude Code saves settings by renaming a tmp file over `settings.json` and `rename()` over a mountpoint fails with `EBUSY` — so in-session settings changes (effort, model, theme) actually save; they last for that container run, are re-seeded from the host file on the next start, and are never written back to the host. Keeping it separate from your host `settings.json` avoids dragging macOS-only keys (`sandbox`, `env.SSL_CERT_FILE`, `enabledPlugins`) or host-filesystem `hooks` into the container. See [`examples/settings.docker.json`](examples/settings.docker.json) for a starting point.
 
@@ -141,7 +146,7 @@ claude-docker --claude-dir=~/.claude-work ~/repo
 CLAUDE_DOCKER_CONFIG_DIR=~/.claude-work claude-docker ~/repo
 ```
 
-The chosen dir takes the place of `~/.claude` for every item in the parity table above (agents, skills, commands, `CLAUDE.md`, statusline, `settings.docker.json`).
+The chosen dir takes the place of `~/.claude` for every item in the parity table above (agents, skills, commands, themes, `CLAUDE.md`, statusline, `settings.docker.json`).
 
 ### Git identity
 
@@ -152,6 +157,18 @@ The chosen dir takes the place of `~/.claude` for every item in the parity table
 `run.sh` exports `CLAUDE_DOCKER_FLAGS` into the container with the comma-separated list of active opt-ins (`gh`, `gh-direct`, `aws`, `glab`, `tfe`, `az`, `registry`, `api`, `ephemeral`, `ro`) and wraps the host statusline script so a yellow `docker:<flags>` tag is prepended to whatever your personal statusline renders. The variable is set by the wrapper for the statusline to read — not a user-tunable knob. `--yolo` / `--dangerously-skip-permissions` is not surfaced here — Claude Code's own mode indicator already makes it obvious. The wrapper is a no-op passthrough when no opt-ins are active, so your statusline looks unchanged on a plain `claude-docker ~/repo`.
 
 The image sets `IS_SANDBOX=1` — historically required to let `--yolo` / `--dangerously-skip-permissions` work when claude ran as root. The entrypoint now drops to the host UID before exec'ing claude, so the root-user check no longer triggers in steady state; `IS_SANDBOX=1` remains as a safety net for the legacy `HOST_UID=0` fall-through path. OS-level hardening comes from `--cap-drop ALL` (with `CHOWN`, `SETUID`, `SETGID`, `DAC_READ_SEARCH` re-added for transient entrypoint use only), `--security-opt no-new-privileges`, the Docker default seccomp profile, `--init` (tini reaps subprocess zombies), and the bind-mount layout. See [File ownership](#file-ownership) and [Threat model](#threat-model) below.
+
+### Cost
+
+claude-docker does not add a cost to the statusline. Claude Code passes the session's cost so far to your statusline script as `.cost.total_cost_usd`, in the container as on the host; show it wherever your layout wants it.
+
+For spend across sessions, run [`ccusage`](https://github.com/ryoppippi/ccusage) on demand; the image does not ship it. Run it from `~`, because `pnpm dlx` creates a `.pnpm-store/` in the current directory:
+
+```bash
+cd ~ && pnpm dlx ccusage@20.0.26 daily
+```
+
+It reads the transcripts in the `claude-code-home` volume, so it reports container sessions only, not host sessions.
 
 ## Auth model
 
