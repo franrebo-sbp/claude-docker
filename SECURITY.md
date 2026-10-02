@@ -44,7 +44,7 @@ it produces, the credential opt-in model, the privilege drop and capability set,
 the `gh` auth-proxy sidecar, and the persistent named-volume model.
 
 Out of scope, because they are documented properties rather than defects — read
-the [threat model](README.md#threat-model) before reporting:
+the [threat model](docs/security.md#threat-model) before reporting:
 
 - **Full outbound network with no egress filtering.** There is no network
   policy; a session can reach anything the host can.
@@ -56,7 +56,7 @@ the [threat model](README.md#threat-model) before reporting:
 - **State persists across sessions** in the `claude-code-root` and
   `claude-code-home` named volumes unless `--ephemeral` is passed — including
   config a session plants for later sessions to execute (see the [threat
-  model](README.md#threat-model)).
+  model](docs/security.md#threat-model)).
 - **`--yolo` / `--dangerously-skip-permissions` is a deliberate mode**, not a
   misconfiguration.
 - **The container is not a full sandbox.** It narrows blast radius compared with
