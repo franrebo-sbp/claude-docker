@@ -158,6 +158,18 @@ The chosen dir takes the place of `~/.claude` for every item in the parity table
 
 The image sets `IS_SANDBOX=1` — historically required to let `--yolo` / `--dangerously-skip-permissions` work when claude ran as root. The entrypoint now drops to the host UID before exec'ing claude, so the root-user check no longer triggers in steady state; `IS_SANDBOX=1` remains as a safety net for the legacy `HOST_UID=0` fall-through path. OS-level hardening comes from `--cap-drop ALL` (with `CHOWN`, `SETUID`, `SETGID`, `DAC_READ_SEARCH` re-added for transient entrypoint use only), `--security-opt no-new-privileges`, the Docker default seccomp profile, `--init` (tini reaps subprocess zombies), and the bind-mount layout. See [File ownership](#file-ownership) and [Threat model](#threat-model) below.
 
+### Cost
+
+claude-docker does not add a cost to the statusline. Claude Code passes the session's cost so far to your statusline script as `.cost.total_cost_usd`, in the container as on the host; show it wherever your layout wants it.
+
+For spend across sessions, run [`ccusage`](https://github.com/ryoppippi/ccusage) on demand; the image does not ship it. Run it from `~`, because `pnpm dlx` creates a `.pnpm-store/` in the current directory:
+
+```bash
+cd ~ && pnpm dlx ccusage@20.0.26 daily
+```
+
+It reads the transcripts in the `claude-code-home` volume, so it reports container sessions only, not host sessions.
+
 ## Auth model
 
 Credentials are opt-in per run — see [Credential opt-in](#credential-opt-in) above for the per-flag effect, mounts, and env-var forwarding. The subsections below cover the two workflows that need more than a one-line table cell.
