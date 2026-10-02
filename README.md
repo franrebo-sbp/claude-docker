@@ -125,11 +125,16 @@ Conversation history persists in the shared `claude-code-home` volume (skipped u
 - [Maintenance](docs/maintenance.md) — updating pinned tool versions, CI smoke tests
 - [Usage](docs/usage.md) — host config parity, worktrees, split panes, extending the image
 
-## Related work
+## Scope
 
-claude-docker is the wrong tool if you have no docker or podman (see [Container runtime](#container-runtime)), run an agent other than Claude Code (the image and [Host config parity](docs/usage.md#host-config-parity) are Claude Code-specific), or want to work on host files with no mount boundary or container start cost. For those cases, [nono](https://github.com/nolabs-ai/nono) sandboxes an agent at the kernel level (Landlock on Linux, Seatbelt on macOS) with no daemon or container, and works with any agent. Its [security policy](https://github.com/nolabs-ai/nono/blob/main/SECURITY.md) describes it as early development with security guarantees "not yet stable" and production use "not recommended".
+claude-docker runs Claude Code in a container, with credentials off unless you opt in. It doesn't:
 
-The two are complementary, not competing: nono's [container docs](https://nono.sh/docs/cli/internals/containers.md) recommend running it inside a container, which gives namespace isolation and resource limits while nono adds path-level filesystem control and credential blocking. To do that here, install nono in a child image (see [Extending the image](docs/usage.md#extending-the-image)). nono is not built into the base image; see [#75](https://github.com/schubergphilis/claude-docker/issues/75) and [#12](https://github.com/schubergphilis/claude-docker/issues/12).
+- work without docker or podman,
+- run agents other than Claude Code,
+- isolate work on host files outside a container,
+- apply per-path filesystem rules inside the container.
+
+To add per-path rules inside the container, you can install a kernel-level sandbox such as [nono](https://github.com/nolabs-ai/nono) in a child image (see [Extending the image](docs/usage.md#extending-the-image)).
 
 ## Specs
 
