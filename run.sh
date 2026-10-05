@@ -63,27 +63,46 @@ Wrapper flags:
                       *.ghe.com) or hosts that can't run the sidecar.
                       Mutually exclusive with --gh.
   --glab              Opt in to GitLab: mount glab-cli config (:ro) and
-                      forward GITLAB_TOKEN; unmask in-container glab login.
+                      forward GITLAB_TOKEN (env, else host glab's stored
+                      token, keyring included) and GITLAB_HOST; unmask
+                      in-container glab login.
   --tfe               Opt in to Terraform Cloud (app.terraform.io): mount
                       ~/.terraform.d/credentials.tfrc.json (:ro) when
                       present and forward TF_TOKEN_app_terraform_io;
                       unmask in-container `terraform login` state.
+  --az                Opt in to Azure DevOps (Services or on-prem Server):
+                      forward AZURE_DEVOPS_EXT_PAT (the PAT) and
+                      AZURE_DEVOPS_ORG_URL (default org, and so the host) when
+                      set; unmask in-container ~/.azure state. Mounts no
+                      host ~/.azure file (no profile, no token caches). Covers
+                      az devops / repos / boards / pipelines only.
+                      Optional private CA via CLAUDE_DOCKER_AZ_CA.
   --registry          Opt in to private package registries: surface host-
                       native uv/npm/pnpm/pip config so in-container installs
                       resolve against a private feed. Mounts ~/.npmrc,
                       ~/.config/uv/uv.toml, and pip.conf (:ro) when present and
                       forwards UV_INDEX_* / npm_config_registry / PIP_* env
                       when set. Runtime only; the image build is unaffected.
-                      ~/.netrc is NOT mounted (too broad — see README); npmrc
-                      and pip.conf are whole-file mounts, so scope them to the
-                      registry. See README "Private package registries".
+                      ~/.netrc is NOT mounted (too broad); npmrc and pip.conf
+                      are whole-file mounts, so scope them to the registry.
+                      See docs/auth.md, "Private package registries".
+  --api               Opt in to a custom model endpoint (LiteLLM, gateway):
+                      forward ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN /
+                      ANTHROPIC_API_KEY / ANTHROPIC_CUSTOM_HEADERS /
+                      ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL
+                      / ANTHROPIC_SMALL_FAST_MODEL /
+                      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS /
+                      CLAUDE_CODE_MAX_CONTEXT_TOKENS when set. The endpoint
+                      receives all prompt content. Private CA: see
+                      CLAUDE_DOCKER_API_CA. Bedrock/Vertex not covered.
+                      Requires ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY.
   --iterm             Wrap claude in tmux -CC (iTerm2 control mode → native
                       panes). Equivalent to CLAUDE_DOCKER_TMUX=cc.
   --tmux              Wrap claude in plain tmux (works in any terminal).
                       Equivalent to CLAUDE_DOCKER_TMUX=1.
   --claude-dir=PATH   Use PATH as the host Claude config dir instead of
-                      ~/.claude. Affects agents, commands, skills, CLAUDE.md,
-                      and statusline. Env: CLAUDE_DOCKER_CONFIG_DIR.
+                      ~/.claude. Affects agents, commands, skills, themes,
+                      CLAUDE.md, and statusline. Env: CLAUDE_DOCKER_CONFIG_DIR.
 
 Separator:
   --                  Ends wrapper-flag parsing. Everything after is passed
@@ -107,6 +126,12 @@ Environment:
   CLAUDE_DOCKER_GH_POLICY  Path to a Caddyfile snippet imported into the --gh
                            sidecar's api.github.com site block, to extend the
                            default request-filtering policy.
+  CLAUDE_DOCKER_API_CA     Path to a PEM CA certificate for the --api endpoint;
+                           installed into the container's trust store. Ignored
+                           without --api.
+  CLAUDE_DOCKER_AZ_CA      Path to a PEM CA certificate for an on-prem Azure
+                           DevOps Server; installed into the container's trust
+                           store, so trusted for all TLS. Ignored without --az.
 
 Credentials are off by default; combine opt-ins as needed:
   claude-docker --aws --gh ~/repo
@@ -134,7 +159,9 @@ WITH_GH=0
 WITH_GH_DIRECT=0
 WITH_GLAB=0
 WITH_TFE=0
+WITH_AZ=0
 WITH_REGISTRY=0
+WITH_API=0
 CLAUDE_CONFIG_DIR="${CLAUDE_DOCKER_CONFIG_DIR:-$HOME/.claude}"
 saw_sep=0
 for arg in "$@"; do
@@ -152,7 +179,9 @@ for arg in "$@"; do
     --gh-direct)    WITH_GH_DIRECT=1 ;;
     --glab)         WITH_GLAB=1 ;;
     --tfe)          WITH_TFE=1 ;;
+    --az)           WITH_AZ=1 ;;
     --registry)     WITH_REGISTRY=1 ;;
+    --api)          WITH_API=1 ;;
     --iterm)        CLAUDE_DOCKER_TMUX=cc ;;
     --tmux)         CLAUDE_DOCKER_TMUX=1 ;;
     --claude-dir=*) CLAUDE_CONFIG_DIR="${arg#--claude-dir=}" ;;
@@ -168,6 +197,24 @@ done
 # outright (same exit style as the unknown-flag case above).
 if [ "$WITH_GH" = "1" ] && [ "$WITH_GH_DIRECT" = "1" ]; then
   echo "claude-docker: --gh and --gh-direct are mutually exclusive — pick the auth-proxy sidecar (--gh) or legacy token forwarding (--gh-direct)" >&2
+  exit 1
+fi
+
+# --api without a gateway token would let Claude Code send the volume's claude.ai
+# OAuth token to ANTHROPIC_BASE_URL as its bearer. Empty counts as unset, so a
+# failed `$(helper)` / `op read` stops here too.
+if [ "$WITH_API" = "1" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  echo "claude-docker: --api needs ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY set (non-empty); without one, Claude Code sends your claude.ai OAuth token to the gateway" >&2
+  exit 1
+fi
+
+# --az private CA, e.g. for an on-prem Azure DevOps Server. Its own variable, not
+# the host's REQUESTS_CA_BUNDLE, since that is often set for unrelated reasons
+# and this CA ends up trusted for all TLS in the container. It is mounted and
+# installed below rather than forwarded. A set-but-missing path is fatal:
+# skipping it would fail later at the first TLS handshake.
+if [ "$WITH_AZ" = "1" ] && [ -n "${CLAUDE_DOCKER_AZ_CA:-}" ] && [ ! -f "$CLAUDE_DOCKER_AZ_CA" ]; then
+  echo "claude-docker: CLAUDE_DOCKER_AZ_CA '$CLAUDE_DOCKER_AZ_CA' is not a file" >&2
   exit 1
 fi
 
@@ -313,9 +360,11 @@ api.github.com {
 		format json
 	}
 
+	# Both routes GitHub serves a repo on: /repos/{owner}/{repo} and the
+	# numeric-id alias /repositories/{id} (the form its Link headers use).
 	@gh_proxy_repo_delete {
 		method DELETE
-		path_regexp ^/repos/[^/]+/[^/]+/?$
+		path_regexp ^/(repos/[^/]+/[^/]+|repositories/[0-9]+)/?$
 	}
 	respond @gh_proxy_repo_delete "claude-docker gh-proxy policy: repository deletion is blocked by default. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
 	import /etc/caddy/policy.caddy
@@ -344,7 +393,9 @@ EOF
 case "$CLAUDE_CONFIG_DIR" in "~/"*) CLAUDE_CONFIG_DIR="$HOME/${CLAUDE_CONFIG_DIR#\~/}" ;; esac
 
 MOUNT_ARGS=()
-ENV_ARGS=(-e TERM)
+# COLORTERM next to TERM: without it Claude Code falls back to 256 colours in
+# the container and custom theme colours render rounded (host-config-parity).
+ENV_ARGS=(-e TERM -e COLORTERM)
 CONTAINER_PATHS=()
 
 ws_suffix=""
@@ -408,6 +459,16 @@ if [ "$WITH_TFE" = "1" ]; then
     && MOUNT_ARGS+=("-v" "$(hostpath "$HOME/.terraform.d/credentials.tfrc.json"):/root/.terraform.d/credentials.tfrc.json:ro")
 fi
 
+# Azure DevOps: no host ~/.azure file is mounted. Auth is the PAT in
+# AZURE_DEVOPS_EXT_PAT and the host is whatever AZURE_DEVOPS_ORG_URL names
+# (Services or an on-prem Server); azureProfile.json would only carry tenant /
+# subscription IDs and the account name in, and the AAD token caches never are.
+if [ "$WITH_AZ" = "1" ]; then
+  # Installed by the entrypoint's update-ca-certificates step (claude-docker-*.crt),
+  # so git/curl trust it too; the az wrapper points requests at the system bundle.
+  [ -n "${CLAUDE_DOCKER_AZ_CA:-}" ] && MOUNT_ARGS+=("-v" "$(hostpath "$CLAUDE_DOCKER_AZ_CA"):/usr/local/share/ca-certificates/claude-docker-az.crt:ro")
+fi
+
 # Private package registries: surface the host's native uv/npm/pnpm/pip registry
 # config read-only so in-container installs resolve against a private feed
 # (CodeArtifact / Artifactory / Nexus / …). Each mount is a silent no-op when the
@@ -436,20 +497,39 @@ if [ "$WITH_REGISTRY" = "1" ]; then
   [ -n "$pip_conf" ] && MOUNT_ARGS+=("-v" "$(hostpath "$pip_conf"):/root/.config/pip/pip.conf:ro")
 fi
 
+# --api private CA: mounted where the entrypoint's update-ca-certificates step
+# (shared with the --gh sidecar CA) picks it up. Claude Code's native binary
+# reads the OS trust store, so no NODE_EXTRA_CA_CERTS is needed. A set-but-
+# missing path is fatal: skipping it would fail later at the first request.
+if [ "$WITH_API" = "1" ] && [ -n "${CLAUDE_DOCKER_API_CA:-}" ]; then
+  if [ ! -f "$CLAUDE_DOCKER_API_CA" ]; then
+    echo "claude-docker: CLAUDE_DOCKER_API_CA '$CLAUDE_DOCKER_API_CA' is not a file" >&2
+    exit 1
+  fi
+  MOUNT_ARGS+=("-v" "$(hostpath "$CLAUDE_DOCKER_API_CA"):/usr/local/share/ca-certificates/claude-docker-api.crt:ro")
+fi
+
 ENV_VARS=()
 # GH_TOKEN/GITHUB_TOKEN are forwarded verbatim only under --gh-direct: under
 # --gh the token instead goes to the auth-proxy sidecar (see below), never
 # into the agent container.
 [ "$WITH_GH_DIRECT" = "1" ] && ENV_VARS+=(GH_TOKEN GITHUB_TOKEN)
-[ "$WITH_GLAB" = "1" ] && ENV_VARS+=(GITLAB_TOKEN)
+[ "$WITH_GLAB" = "1" ] && ENV_VARS+=(GITLAB_TOKEN GITLAB_HOST)
 [ "$WITH_AWS" = "1" ]  && ENV_VARS+=(AWS_PROFILE AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN)
 [ "$WITH_TFE" = "1" ]  && ENV_VARS+=(TF_TOKEN_app_terraform_io)
+[ "$WITH_AZ" = "1" ]   && ENV_VARS+=(AZURE_DEVOPS_EXT_PAT AZURE_DEVOPS_ORG_URL)
 # --registry: forward the native registry-config env vars uv/npm/pnpm/pip read.
 # Static, fixed-name vars here; uv's dynamic per-index credential vars (whose
 # names embed a user-chosen index name) are handled by the scan below.
 # UV_NETRC is intentionally omitted: it points uv at a netrc file we no longer
 # mount, so forwarding it would dangle at a host path absent in the container.
 [ "$WITH_REGISTRY" = "1" ] && ENV_VARS+=(npm_config_registry NPM_CONFIG_REGISTRY NODE_AUTH_TOKEN NPM_TOKEN UV_INDEX_URL UV_DEFAULT_INDEX UV_EXTRA_INDEX_URL UV_INDEX UV_KEYRING_PROVIDER PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST PIPENV_PYPI_MIRROR)
+# --api: Claude Code endpoint vars (code.claude.com/docs/en/env-vars). Bedrock/
+# Vertex/Foundry (CLAUDE_CODE_USE_*) are deliberately out of scope for now.
+# DISABLE_EXPERIMENTAL_BETAS: gateways to non-Anthropic models often reject
+# anthropic-beta headers. MAX_CONTEXT_TOKENS: gateway model IDs are unknown to
+# Claude Code, so it can't infer their context window for auto-compact.
+[ "$WITH_API" = "1" ] && ENV_VARS+=(ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_CUSTOM_HEADERS ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_SMALL_FAST_MODEL CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS CLAUDE_CODE_MAX_CONTEXT_TOKENS)
 # Guarded: bash 3.2 under `set -u` errors on empty-array expansion.
 if [ "${#ENV_VARS[@]}" -gt 0 ]; then
   for v in "${ENV_VARS[@]}"; do
@@ -491,6 +571,23 @@ fi
 # discovery precedence above (host env wins over the gh-CLI fallback). Empty
 # when --gh wasn't passed or no token was found either way.
 GH_HOST_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-$GH_DISCOVERED_TOKEN}}"
+# GitLab token discovery for --glab, same shape as gh's: host GITLAB_TOKEN
+# wins; else ask host glab for the token of its default host (GITLAB_HOST,
+# else config.yml's `host`, else gitlab.com). `glab config get token --host`
+# reads the OS keyring too, which the read-only config mount can't carry;
+# without --host it never looks at per-host tokens. Silent skip when glab is
+# absent or not logged in. Forwarded by bare name, never on argv.
+if [ "$WITH_GLAB" = "1" ] && [ -z "${GITLAB_TOKEN:-}" ] \
+   && command -v glab >/dev/null 2>&1; then
+  _glab_host=$(GLAB_CHECK_UPDATE=false glab config get host 2>/dev/null) || true
+  _glab_host=${_glab_host#*://}
+  _glab_host=${_glab_host%%/*}
+  GITLAB_TOKEN=$(GLAB_CHECK_UPDATE=false glab config get token --host "${_glab_host:-gitlab.com}" 2>/dev/null) || true
+  if [ -n "$GITLAB_TOKEN" ]; then
+    export GITLAB_TOKEN
+    ENV_ARGS+=("-e" "GITLAB_TOKEN")
+  fi
+fi
 
 # Forward host git identity so in-container `git commit` works without a
 # per-invocation `-c user.email=...` dance. Non-opt-in: user.name/user.email
@@ -519,7 +616,9 @@ DOCKER_FLAGS=()
 [ "$WITH_AWS" = "1" ]      && DOCKER_FLAGS+=("aws")
 [ "$WITH_GLAB" = "1" ]     && DOCKER_FLAGS+=("glab")
 [ "$WITH_TFE" = "1" ]      && DOCKER_FLAGS+=("tfe")
+[ "$WITH_AZ" = "1" ]       && DOCKER_FLAGS+=("az")
 [ "$WITH_REGISTRY" = "1" ] && DOCKER_FLAGS+=("registry")
+[ "$WITH_API" = "1" ]      && DOCKER_FLAGS+=("api")
 [ "$EPHEMERAL" = "1" ]     && DOCKER_FLAGS+=("ephemeral")
 [ "$RO_WORKSPACES" = "1" ] && DOCKER_FLAGS+=("ro")
 if [ "${#DOCKER_FLAGS[@]}" -gt 0 ]; then
@@ -730,7 +829,7 @@ if [ "$WITH_GH" = "1" ] && [ -n "$GH_HOST_TOKEN" ]; then
   echo "claude-docker: gh-auth-proxy sidecar '$GH_PROXY_SIDECAR' is active — view the audit log with: $RUNTIME logs $GH_PROXY_SIDECAR" >&2
 fi
 
-for item in agents commands skills; do
+for item in agents commands skills themes; do
   src="$CLAUDE_CONFIG_DIR/$item"
   # Resolve top-level symlink so cp -RL gets a real directory path, not a link.
   # Hop counter guards against pathological symlink cycles (a -> b -> a).
@@ -755,12 +854,24 @@ fi
 # path that prefixes a `docker:<flags>` tag when CLAUDE_DOCKER_FLAGS is set.
 # The wrapper is a no-op passthrough when unset so non-claude-docker runs of
 # the same file would behave identically.
+# The host script is exec'd directly so its shebang picks the interpreter, as
+# it does on the host. Never `sh script`: /bin/sh is dash in the image, and a
+# bash statusline dies there with "Bad substitution". The exec result, not
+# `[ -x ]`, decides the fallback: on Docker Desktop's virtiofs mounts `-x`
+# reports true for a 0644 file whose exec then fails. Exit 126 (not
+# executable) or 127 (shebang interpreter missing, e.g. #!/opt/homebrew/...)
+# re-runs it under bash, which also runs POSIX sh scripts. Any other exit
+# status keeps the script's output and does not re-run it.
 if [ -f "$CLAUDE_CONFIG_DIR/statusline-command.sh" ]; then
   cat >"$stage/statusline-command.sh" <<'WRAP'
 #!/bin/sh
 # claude-docker wrapper — prepends active opt-in flag tag to host statusline.
+orig=/root/.claude/statusline-command.original.sh
 input=$(cat)
-body=$(printf '%s' "$input" | sh /root/.claude/statusline-command.original.sh)
+body=$(printf '%s' "$input" | "$orig" 2>/dev/null); rc=$?
+if [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
+  body=$(printf '%s' "$input" | bash "$orig")
+fi
 if [ -n "${CLAUDE_DOCKER_FLAGS:-}" ]; then
   printf '\033[33mdocker:%s\033[0m %s' "$CLAUDE_DOCKER_FLAGS" "$body"
 else
@@ -794,7 +905,7 @@ fi
 # refuses an extensions entry on a v0 repo ("v1-only extension found").
 # Overlay is NOT mounted :ro: container-side `git config` / `git remote add`
 # need to succeed; those writes land in the ephemeral overlay and are dropped
-# at exit, which matches the trade-off documented in the README.
+# at exit, which matches the trade-off documented in docs/security.md.
 # Counter loop for bash 3.2 (no "${!arr[@]}" on indexed arrays).
 n=${#SEEN_NAMES[@]}
 i=0
@@ -804,7 +915,11 @@ while [ "$i" -lt "$n" ]; do
   # Skip workspaces where .git is a worktree/submodule pointer file rather
   # than a directory — only the main repo's .git/config needs the overlay,
   # and the worktree resolves through the main repo's mount anyway.
-  if [ -f "$ws_abs/.git/config" ]; then
+  # Symlinks are refused at both levels: the workspace is writable from the
+  # container, and [ -f ] / cp follow links, so a planted .git or .git/config
+  # link would copy an arbitrary host file into the container.
+  if [ -d "$ws_abs/.git" ] && [ ! -L "$ws_abs/.git" ] \
+     && [ -f "$ws_abs/.git/config" ] && [ ! -L "$ws_abs/.git/config" ]; then
     cp "$ws_abs/.git/config" "$stage/git-config-$ws_name"
     cat >>"$stage/git-config-$ws_name" <<'EOF'
 
@@ -871,6 +986,7 @@ if [ "$EPHEMERAL" = "0" ]; then
   [ "$gh_config_unmask" = "0" ] && MOUNT_ARGS+=("--tmpfs" "/root/.config/gh")
   [ "$WITH_GLAB" = "0" ] && MOUNT_ARGS+=("--tmpfs" "/root/.config/glab-cli")
   [ "$WITH_TFE" = "0" ]  && MOUNT_ARGS+=("--tmpfs" "/root/.terraform.d")
+  [ "$WITH_AZ" = "0" ]   && MOUNT_ARGS+=("--tmpfs" "/root/.azure")
   # AWS has no in-container `login` step to preserve, so unlike gh it needs no
   # unmask state — the mask is on in both directions, only its scope changes.
   # Without --aws the whole directory is masked. With it, just the credential

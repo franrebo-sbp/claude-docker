@@ -15,7 +15,9 @@ into the *selection* — the resulting image is safe to use the moment it is bui
 (see openspec/changes/automate-version-pins/design.md).
 
 The pins/ fragments are the Dockerfile's source of truth: it COPYs + sources
-them. Nothing here ever edits the Dockerfile. nodejs and the base-image digest
+them. For az it also writes pins/az-requirements.txt: azure-cli-core and every
+transitive dep, hash-locked with `uv pip compile` (uv is on PATH whenever this
+runs via `uv run`; pins-updater.yml installs it with setup-uv). Nothing here ever edits the Dockerfile. nodejs and the base-image digest
 stay manual on purpose and are surfaced as reminders.
 
 Usage:
@@ -24,8 +26,7 @@ Usage:
   uv run update_pins.py --block-major-bumps  stay within each tool's current major
   uv run update_pins.py --pin uv=0.12.3      force a specific version (bypasses soak)
   uv run update_pins.py --pin pnpm=11.5.3 --pin uv=0.12.3   multiple overrides
-  python3 update_pins.py --list-npm-tools    list npm tools as TSV (name/pkg/env/var/ver)
-  python3 update_pins.py --list-tools        list all tools as TSV (name/probe/regex/ver)
+  python3 update_pins.py --list-tools        list all tools as TSV (name/probe/regex/ver/kind/ref)
   python3 update_pins.py --audit             soak-gate check against live npm registry
 
 Honors GITHUB_TOKEN / GH_TOKEN (raises the GitHub API rate limit) when set.
@@ -42,11 +43,13 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -77,6 +80,7 @@ class Tool(NamedTuple):
     """One automated pin. `ref` meaning is kind-specific:
       npm    -> npm package name        github -> owner/repo (releases)
       gitlab -> owner/repo (releases)   awscli -> special-cased (tag date + CDN)
+      pypi   -> PyPI project name       azext  -> owner/repo (releases; version from the .whl asset)
 
     `probe` is the argv asking the installed tool its version; `version_re`
     pulls the version out of that argv's stdout. Both live here rather than in
@@ -100,6 +104,7 @@ def soak_days_for(tool: Tool, override: int | None) -> int:
 
 # `version_re` is read by two engines — Python `re` here and bash `[[ =~ ]]` in
 # CI — so it stays inside the subset they agree on: literals, `^`, `$`, `[^ ]+`,
+# `[0-9.]+` (for multi-line output, where `[^ ]` would run on past the newline), ` +`,
 # one capture group. No tool reports its version the same way as another, hence
 # a rule per tool rather than one shared template.
 TOOLS = [
@@ -122,6 +127,13 @@ TOOLS = [
          "tfenv --version", r"^tfenv ([^ ]+)$"),
     Tool("awscli", "awscli", "aws/aws-cli",
          "aws --version", r"^aws-cli/([^ ]+)"),
+    # az is azure-cli-core plus the azure-devops extension, NOT the full
+    # azure-cli distribution (see the Dockerfile). Two pins because they are two
+    # upstream release streams; both answer on the one `az --version` report.
+    Tool("az", "pypi", "azure-cli-core",
+         "az --version", r"^azure-cli +([0-9.]+)"),
+    Tool("azure-devops", "azext", "Azure/azure-devops-cli-extension",
+         "az --version", r"azure-devops +([0-9.]+)"),
 ]
 
 
@@ -210,8 +222,7 @@ def max_stable(versions) -> str:
 
 
 def newest_within_major(versions, major: str) -> str:
-    within = [v for v in versions if SEMVER_RE.match(v) and v.split(".")[0] == major]
-    return max(within, key=_semver_key) if within else ""
+    return max_stable(v for v in versions if major_of(v) == major)
 
 
 def major_of(v: str) -> str:
@@ -220,12 +231,6 @@ def major_of(v: str) -> str:
 
 def is_major_bump(old: str, new: str) -> bool:
     return bool(old) and major_of(old) != major_of(new)
-
-
-def version_var(name: str) -> str:
-    """Return the env-var name for a tool's version pin.
-    E.g. claude-code → CLAUDE_CODE_VERSION, pnpm → PNPM_VERSION."""
-    return name.upper().replace("-", "_") + "_VERSION"
 
 
 def soak_status(pinned: str, cand, soak: timedelta, now: datetime):
@@ -294,6 +299,26 @@ def candidates(kind: str, ref: str):
             for r in rel
             if not r.get("upcoming_release")
         ]
+    if kind == "pypi":
+        # One release = one or more files; its date is the first upload, and a
+        # release with any yanked file is dropped (PyPI's analogue of unpublish).
+        doc = get_json(f"https://pypi.org/pypi/{ref}/json")
+        return [
+            (v, files[0]["upload_time_iso_8601"])
+            for v, files in doc.get("releases", {}).items()
+            if files and not any(f.get("yanked") for f in files)
+        ]
+    if kind == "azext":
+        # Release tags are build numbers (20260902.1); the extension's own
+        # version is only in the wheel's filename, so read it from the asset.
+        rel = get_json(f"https://api.github.com/repos/{ref}/releases?per_page=100", gh_headers())
+        return [
+            (m.group(1), r["published_at"])
+            for r in rel
+            if not r["draft"] and not r["prerelease"]
+            for a in r.get("assets", [])
+            if (m := re.match(r"^azure_devops-(\d+\.\d+\.\d+)-py", a["name"]))
+        ]
     raise ValueError(f"unknown kind: {kind}")
 
 
@@ -315,17 +340,15 @@ def aws_cli_tags():
 
 
 # ---- resolution ------------------------------------------------------------
+@dataclass(slots=True)
 class Result:
-    __slots__ = ("status", "version", "age", "held", "held_age", "blocked_major", "note")
-
-    def __init__(self):
-        self.status = ""            # UPDATE | NOCHANGE | OVERRIDE | ERROR
-        self.version = ""
-        self.age = ""
-        self.held = ""
-        self.held_age = ""
-        self.blocked_major = ""
-        self.note = ""              # free-text annotation for the report
+    status: str = ""            # UPDATE | NOCHANGE | OVERRIDE | ERROR
+    version: str = ""
+    age: str = ""
+    held: str = ""
+    held_age: str = ""
+    blocked_major: str = ""
+    note: str = ""              # free-text annotation for the report
 
 
 def _age_days(now: datetime, iso: str) -> str:
@@ -470,6 +493,16 @@ def fragment_lines(name: str, v: str) -> list[str]:
             "X86_64": f"{base}/awscli-exe-linux-x86_64-{v}.zip",
             "AARCH64": f"{base}/awscli-exe-linux-aarch64-{v}.zip",
         })
+    if name == "az":
+        # PyPI-backed, version-only like the npm tools: uv resolves it from PyPI
+        # at build time (see the Dockerfile's az block for what that trusts).
+        return [f"AZ_VERSION={v}"]
+    if name == "azure-devops":
+        # Pure-Python wheel, arch-independent: one URL + sha. The CDN path is the
+        # one `az extension add` itself downloads from (the extension index).
+        url = f"https://azcliprod.blob.core.windows.net/cli-extensions/azure_devops-{v}-py2.py3-none-any.whl"
+        return [f"AZURE_DEVOPS_VERSION={v}", f"AZURE_DEVOPS_URL={url}",
+                f"AZURE_DEVOPS_SHA256={sha256_of_download(url)}"]
     if name == "tfenv":
         url = f"https://github.com/tfutils/tfenv/archive/refs/tags/v{v}.tar.gz"
         return [f"TFENV_VERSION={v}", f"TFENV_URL={url}",
@@ -483,6 +516,27 @@ def write_fragment(stage: Path, name: str, version: str):
         f"(use: update_pins.py --pin {name}=<version>).\n"
     )
     (stage / f"{name}.env").write_text(header + "\n".join(fragment_lines(name, version)) + "\n")
+    if name == "az":
+        write_az_lock(stage / "az-requirements.txt", version)
+
+
+# The Dockerfile installs az with --require-hashes from this lock, so every
+# transitive dep is pinned too. --universal keeps markers for both arches.
+AZ_LOCK_INPUT = ["python-dateutil", "msrest", "azure-common"]
+
+
+def write_az_lock(out: Path, version: str):
+    reqs = "\n".join([f"azure-cli-core=={version}", *AZ_LOCK_INPUT]) + "\n"
+    subprocess.run(
+        ["uv", "pip", "compile", "-", "--universal", "--python-version", "3.13",
+         "--generate-hashes", "--no-header", "--quiet", "-o", str(out)],
+        input=reqs, text=True, check=True,
+    )
+    body = out.read_text()
+    out.write_text(
+        "# Generated by update_pins.py alongside pins/az.env — do not edit by hand.\n"
+        + body
+    )
 
 
 def read_current(name: str) -> str:
@@ -685,48 +739,24 @@ def print_reminders():
 
 
 # ---- early-return modes (no pin refresh) -----------------------------------
-def run_list_npm_tools() -> int:
-    """Print one TSV row per npm-pinned tool (name, package, env_file, var, version).
+def run_list_tools() -> int:
+    """Print one TSV row per automated tool (name, probe, version_re, version,
+    kind, ref).
+
+    Two CI consumers: the runtime version check runs each `probe` against the
+    built image and matches the output with `version_re`; the npm supply-chain
+    audit keeps the `kind == npm` rows and installs `ref@version`.
 
     Validates ALL tools first; if any has an empty version pin it emits a
     GitHub Actions error annotation to stderr and exits non-zero WITHOUT having
     printed any partial output (fail-closed producer). NOTE: the non-zero exit
     only protects a consumer that actually checks it — capture the output via
-    `out=$(... --list-npm-tools)` (which aborts under `set -e`), NOT via a
+    `out=$(... --list-tools)` (which aborts under `set -e`), NOT via a
     `while ... done < <(...)` process substitution, whose exit code bash does
-    not propagate. See the CI audit step in .github/workflows/ci.yml.
+    not propagate. See the CI steps in .github/workflows/ci.yml.
 
     Output columns (tab-separated, no header):
-        name   package   env_file   var   version
-    """
-    npm_tools = [(t.name, t.ref) for t in TOOLS if t.kind == "npm"]
-
-    # Validate all pins before emitting anything — fail-closed.
-    rows = []
-    for name, pkg in npm_tools:
-        ver = read_current(name)
-        if not ver:
-            print(f"::error::no pinned version for {name}", file=sys.stderr)
-            return 1
-        rows.append((name, pkg, f"{name}.env", version_var(name), ver))
-
-    # All present — emit the table.
-    for name, pkg, env_file, var, ver in rows:
-        print(f"{name}\t{pkg}\t{env_file}\t{var}\t{ver}")
-    return 0
-
-
-def run_list_tools() -> int:
-    """Print one TSV row per automated tool (name, probe, version_re, version).
-
-    Covers every tool, not just npm-backed ones: the caller is CI's runtime
-    version check, which runs each `probe` against the built image and matches
-    the output with `version_re`. Same fail-closed producer contract as
-    run_list_npm_tools() — validate every pin before emitting anything, and see
-    that function's note on why a consumer must capture with `$(...)`.
-
-    Output columns (tab-separated, no header):
-        name   probe   version_re   version
+        name   probe   version_re   version   kind   ref
     """
     rows = []
     for tool in TOOLS:
@@ -734,7 +764,7 @@ def run_list_tools() -> int:
         if not ver:
             print(f"::error::no pinned version for {tool.name}", file=sys.stderr)
             return 1
-        rows.append((tool.name, tool.probe, tool.version_re, ver))
+        rows.append((tool.name, tool.probe, tool.version_re, ver, tool.kind, tool.ref))
 
     for row in rows:
         print("\t".join(row))
@@ -799,15 +829,14 @@ def parse_args(argv):
                    help="stay within each tool's current major version")
     p.add_argument("--pin", action="append", default=[], metavar="TOOL=VERSION",
                    help="force a specific version (bypasses soak); repeatable")
-    p.add_argument("--list-npm-tools", action="store_true",
-                   help="print one TSV row per npm-pinned tool (name, package, env_file, var,"
-                        " version) then exit; no pin refresh; exits non-zero if any pin is missing")
-    p.add_argument("--list-tools", action="store_true",
-                   help="print one TSV row per automated tool (name, probe, version_re, version)"
-                        " then exit; no pin refresh; exits non-zero if any pin is missing")
-    p.add_argument("--audit", action="store_true",
-                   help="verify each npm-pinned tool's installed version passes the soak gate"
-                        " (requires network); no pin refresh; exits non-zero if any tool fails")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--list-tools", action="store_true",
+                      help="print one TSV row per automated tool (name, probe, version_re, version,"
+                           " kind, ref)"
+                           " then exit; no pin refresh; exits non-zero if any pin is missing")
+    mode.add_argument("--audit", action="store_true",
+                      help="verify each npm-pinned tool's installed version passes the soak gate"
+                           " (requires network); no pin refresh; exits non-zero if any tool fails")
     args = p.parse_args(argv)
     if args.soak is not None and args.soak < 0:
         p.error("--soak must be a non-negative integer")
@@ -832,22 +861,9 @@ def main(argv=None) -> int:
     args, overrides = parse_args(sys.argv[1:] if argv is None else argv)
 
     # Early-return modes — run before the normal refresh flow (no pin writes).
-    # Listings run before --audit; a non-zero exit from one short-circuits, since
-    # a later mode would have no useful input.
+    # parse_args makes them mutually exclusive, so at most one is set.
     if args.list_tools:
-        rc = run_list_tools()
-        if rc != 0:
-            return rc
-        if not (args.list_npm_tools or args.audit):
-            return 0
-
-    if args.list_npm_tools:
-        rc = run_list_npm_tools()
-        if rc != 0:
-            return rc
-        if not args.audit:
-            return 0
-
+        return run_list_tools()
     if args.audit:
         return run_audit(args.soak)
 
@@ -889,7 +905,7 @@ def main(argv=None) -> int:
             print(f"  … {name}")
 
         # commit staged fragments — os.replace is an atomic per-file rename
-        for f in stage.glob("*.env"):
+        for f in stage.iterdir():
             os.replace(f, PINS_DIR / f.name)
     finally:
         shutil.rmtree(stage, ignore_errors=True)

@@ -13,7 +13,7 @@
 
 ## 3. Documentation
 
-- [x] 3.1 Add a README section covering the attach workflow: name the container, attach, confirm `whoami` returns `claude`, run `claude`, `/ide` connects.
+- [x] 3.1 Add a `docs/usage.md` section covering the attach workflow: name the container, attach, confirm `whoami` returns `claude`, run `claude`, `/ide` connects.
 - [x] 3.2 Document the `mkdir: Permission denied` failure mode and its cause, so an operator who hits it on an older image can identify it.
 - [x] 3.3 Document the `HOST_UID=0` exception and the per-machine `"remoteUser": "root"` override.
 - [x] 3.4 State why the host-IDE alternative is not offered, referencing the threat model's framing.

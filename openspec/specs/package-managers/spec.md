@@ -105,10 +105,12 @@ The documentation SHALL group these by whether they add a capability the image d
 
 For the last of these, the documentation SHALL state that naming a package manager or a runtime provisions that release rather than installing the npm package of the same name; that the version is selected by the caller or by a workspace field rather than pinned in the image; that pnpm resolves these through npm's trusted package-manager registries and verifies an npm-published one against npm's signature for its exact version before executing it, so provenance is checked even though the version is not pinned; and that no refusal switch equivalent to `GOTOOLCHAIN=local` is documented upstream.
 
+These scenarios describe what the documentation says, not which file says it.
+
 #### Scenario: README threat model includes runtime-fetch bullet
 
-- **WHEN** a reader inspects `claude-docker/README.md` § Threat model
-- **THEN** the section contains a bullet covering `npx`, `pnpm dlx`, `uvx`, and `tfenv install` as runtime code-fetch primitives
+- **WHEN** a reader inspects the project's threat-model documentation
+- **THEN** it contains a bullet covering `npx`, `pnpm dlx`, `uvx`, and `tfenv install` as runtime code-fetch primitives
 - **AND** the bullet identifies `uvx` (PyPI) and `tfenv install` (HashiCorp releases) as runtime-fetch primitives whose downloaded binaries are not pinned in the image
 - **AND** the bullet names `pnpx`, `pnx`, and `pn dlx` as aliases of `pnpm dlx`, so a reader does not read them as separate, undocumented commands
 
@@ -123,14 +125,14 @@ For the last of these, the documentation SHALL state that naming a package manag
 
 #### Scenario: persistence of provisioned runtimes is documented
 
-- **GIVEN** `tfenv install` writes to `/opt/tfenv/versions/`, which the README notes does not persist across `docker run --rm`
+- **GIVEN** `tfenv install` writes to `/opt/tfenv/versions/`, which the documentation notes does not persist across `docker run --rm`
 - **WHEN** a reader compares that to pnpm's provisioning
 - **THEN** the documentation states that provisioned runtimes and package managers are stored under the container's home directory — in pnpm's package-manager store and cache — which is inside the `claude-code-root` named volume
 - **AND** it states that they therefore survive container exit and are reused by later sessions, unlike the `tfenv install` downloads
 
 #### Scenario: bundled CLIs list includes new tools
 
-- **WHEN** a reader inspects the preinstalled-CLI list at the top of `claude-docker/README.md`
+- **WHEN** a reader inspects the preinstalled-CLI list at the top of the project's front-page documentation
 - **THEN** the line names `uv`, `pnpm`, and `tfenv` alongside the existing entries
 - **AND** alias bins that ship with those tools (`uvx`; `pnpx`, `pn`, `pnx`) are documented under the command they alias rather than enumerated in that line, which lists one entry per tool
 

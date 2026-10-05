@@ -7,7 +7,7 @@ Contributions to `claude-docker` are welcome from anyone.
 1. Fork the repository and create a branch off `main` for your change.
 2. Make your change. Keep the container's security posture intact — the
    privilege-drop, capability set, and credential opt-in model are load-bearing
-   (see [Threat model](README.md#threat-model)).
+   (see [Threat model](docs/security.md#threat-model)).
 3. If the change touches behaviour or a spec, follow [OpenSpec
    changes](#openspec-changes) below.
 4. Open a PR against `main`; a maintainer will review before it is merged.
@@ -49,7 +49,7 @@ CI runs these on every PR; running them locally first is faster:
 
 ```bash
 # Lint shell scripts and the Dockerfile
-shellcheck run.sh entrypoint.sh smoke/*.sh
+shellcheck run.sh entrypoint.sh smoke/*.sh scripts/*.sh
 hadolint --config .hadolint.yaml Dockerfile
 
 # Unit tests for the pin tooling
@@ -57,8 +57,10 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 
 # Build the image and run a smoke cell against it
 docker build -t claude-code:local .
-IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,tfe
+IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,tfe,api,az
 ```
 
-See [`README.md`](README.md) for the full architecture, threat model, and the
-version-pin refresh workflow (`update_pins.py`).
+See [`docs/`](docs/) for the reference material: the [threat
+model](docs/security.md#threat-model), the [auth model](docs/auth.md), and the
+[version-pin refresh workflow](docs/maintenance.md#updating-pinned-tool-versions)
+(`update_pins.py`).

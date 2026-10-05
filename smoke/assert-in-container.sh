@@ -7,7 +7,7 @@
 #   exec runuser -u claude -- /workspaces/smoke/assert-in-container.sh
 # Reads expectations from env vars set by smoke.sh:
 #   EXPECT_UID        expected numeric UID (matches HOST_UID forwarded by smoke.sh)
-#   EXPECT_OPTINS     comma-separated list of granted opt-ins (aws glab tfe), or empty
+#   EXPECT_OPTINS     comma-separated list of granted opt-ins (aws glab tfe api az), or empty
 #   WORKSPACE         path to the bind-mounted workspace inside the container
 #   EXPECT_RO         1 = workspace is :ro (skip write probe, only test entrypoint startup)
 #   EXPECT_SETTINGS   1 = a settings fixture was mounted at the seed path; assert the
@@ -284,12 +284,13 @@ optin_config_path() {
     aws)  echo "/root/.aws/config:AWS_PROFILE" ;;
     glab) echo "/root/.config/glab-cli:GITLAB_TOKEN" ;;
     tfe)  echo "/root/.terraform.d/credentials.tfrc.json:TF_TOKEN_app_terraform_io" ;;
+    az)   echo "/root/.azure:AZURE_DEVOPS_EXT_PAT" ;;
     *)    echo "" ;;
   esac
 }
 
 # All known opt-ins in declaration order.
-ALL_OPTINS="aws glab tfe"
+ALL_OPTINS="aws glab tfe az"
 
 check_credentials() {
   local granted_csv="${EXPECT_OPTINS:-}"
@@ -314,7 +315,14 @@ check_credentials() {
       done
     fi
 
-    if [ "$granted" = "1" ]; then
+    if [ "$granted" = "1" ] && [ "$optin" = "az" ]; then
+      # --az mounts no host file (/root/.azure is plain volume state), so the
+      # forwarded PAT is the fixture: it must be OUR sentinel.
+      case "${AZURE_DEVOPS_EXT_PAT:-}" in
+        *SMOKE-SENTINEL*) pass "optin-az-env: AZURE_DEVOPS_EXT_PAT carries the smoke sentinel" ;;
+        *)                fail "optin-az-env: AZURE_DEVOPS_EXT_PAT missing or not the smoke fixture" ;;
+      esac
+    elif [ "$granted" = "1" ]; then
       # Config path must exist and be read-only (mounted :ro by smoke.sh).
       if [ -e "$config_path" ]; then
         pass "optin-${optin}: config path exists: $config_path"
@@ -455,6 +463,37 @@ check_aws_state_masking() {
   fi
 }
 
+# --api has no config path, so it can't ride check_credentials' shape. What
+# matters: the endpoint env arrives, and the mounted private CA made it into
+# the system bundle (the entrypoint's update-ca-certificates step) — without
+# that, a TLS-terminating gateway fails on the first request.
+check_api() {
+  local ca="/usr/local/share/ca-certificates/claude-docker-api.crt"
+  local bundle="/etc/ssl/certs/ca-certificates.crt"
+  case ",${EXPECT_OPTINS:-}," in
+    *,api,*)
+      if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+        pass "optin-api-env: ANTHROPIC_BASE_URL is forwarded"
+      else
+        fail "optin-api-env: ANTHROPIC_BASE_URL expected but not set"
+      fi
+      # Line 2 is the first base64 line of the PEM body — unique to this CA.
+      if [ -f "$ca" ] && grep -qF "$(sed -n 2p "$ca")" "$bundle"; then
+        pass "optin-api-ca: mounted CA is in the system trust bundle"
+      else
+        fail "optin-api-ca: mounted CA missing from $bundle (update-ca-certificates not run?)"
+      fi
+      ;;
+    *)
+      if [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -e "$ca" ]; then
+        fail "leak-api: endpoint env or CA present but opt-in 'api' was not granted"
+      else
+        pass "leak-api: no endpoint env or CA (opt-in off)"
+      fi
+      ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # 6. Seeded settings — must be a writable copy, not a mount
 # ---------------------------------------------------------------------------
@@ -540,6 +579,7 @@ check_path_order
 check_workspace_write
 check_credentials
 check_aws_state_masking
+check_api
 check_settings
 
 echo "==="

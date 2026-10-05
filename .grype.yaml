@@ -27,3 +27,33 @@ ignore:
   - package:
       location: "**/node_modules/npm/**"
     reason: npm's bundled deps ship with the nodejs deb; only Node moves them.
+
+  # az's cryptography, held at 48.x by azure-cli-core's exact msal==1.36.0 pin
+  # (msal <1.39 caps cryptography <49); only a core release moves it. Scoped to
+  # this version and /opt/az, so a newer resolution or any other copy of
+  # cryptography stays enforced. Mirrors the two .trivyignore entries.
+  - package:
+      name: cryptography
+      version: 48.0.1
+      location: /opt/az/**
+    reason: Held by azure-cli-core's msal pin; moves with pins/az.env.
+  # The same pin as the action's second scan (the repo checkout) sees it: the
+  # hash-locked requirements file the Dockerfile installs /opt/az from.
+  - package:
+      name: cryptography
+      version: 48.0.1
+      location: "**/pins/az-requirements.txt"
+    reason: Held by azure-cli-core's msal pin; moves with pins/az.env.
+
+  # GHSA-vfj7-8cjw-p6xm (stack-exhaustion DoS on deeply nested brace patterns)
+  # covers every braces release; 3.0.3 is the latest and none is patched. It
+  # reaches us only as openspec -> fast-glob -> micromatch -> braces, all three
+  # already at their latest. openspec only globs a schema's `generates:` paths,
+  # so the worst case is a repo crashing its own openspec run. Scoped to this
+  # version and openspec's tree, so a patched release or any other copy of
+  # braces stays enforced.
+  - package:
+      name: braces
+      version: 3.0.3
+      location: "**/node_modules/@fission-ai/openspec/**"
+    reason: No patched braces exists; moves with pins/openspec.env.

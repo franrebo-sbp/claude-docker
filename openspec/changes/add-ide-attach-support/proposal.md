@@ -14,7 +14,7 @@ Both are fixed in the image and the wrapper, so a fresh clone works without per-
 - Add a `devcontainer.metadata` label to the image declaring `remoteUser: claude`, the unprivileged account `entrypoint.sh` creates at runtime with the invoking user's uid. An attaching IDE that honours the label execs as the same uid the agent runs as, so the IDE server can write `/root/.vscode-server` and the lockfile it produces is readable by the agent.
 - Have the label also request the `anthropic.claude-code` extension, so it installs into the container rather than the user's local editor. Installing it locally is the default and produces a misleading "Installed extension to VS Code" success with no lockfile behind it.
 - Name the agent container `claude-docker-<workspace>-<session>`, derived from the first workspace's basename and the existing per-session identity, so it is greppable (`docker ps --filter name=claude-docker-`) and self-describing in an attach picker. Unique per session, so concurrent sessions do not collide.
-- Document the attach workflow in `README.md`, including the `Permission denied` failure mode, its cause, and why the host-IDE alternative is not offered.
+- Document the attach workflow in `docs/usage.md`, including the `Permission denied` failure mode, its cause, and why the host-IDE alternative is not offered.
 
 Not in scope: any wrapper flag, mount, or env var for connecting the in-container agent to an IDE running on the host. That path is explicitly rejected below, not merely unimplemented.
 
@@ -32,6 +32,6 @@ None. The label is additive metadata and `--name` adds an argument to the existi
 
 - `Dockerfile` — one `LABEL` near the existing `ENTRYPOINT`. Metadata only: no new layer content, no new package, no change to the runtime process tree or the capability set.
 - `run.sh` — renames the session identity variable from `gh_sid` to `session_sid` (it is no longer gh-specific), derives a container name from it, and adds `--name` to the agent `run`. No change to mounts, env, capabilities, or the privilege drop.
-- `README.md` — a new section covering the attach workflow, and the security rationale for preferring it over a host IDE.
+- `docs/usage.md` — a new section covering the attach workflow, and the security rationale for preferring it over a host IDE.
 - No change to the security posture. The privilege drop, capability set, and credential opt-ins are untouched; the label narrows what an attach can do (unprivileged instead of root) rather than widening it.
 - Users on a root host (`HOST_UID=0`) are a documented exception: `entrypoint.sh` skips user creation on that path, so `claude` does not exist and the label's `remoteUser` cannot resolve. Attaching as root is correct there, and the README names the one-line per-machine override.

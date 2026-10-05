@@ -104,6 +104,11 @@ class TestParseArgsPin(unittest.TestCase):
         for ver in ("1.2.3; rm -rf /", "1.2.3 4", "`id`", "1.2.3/../x", "a$(id)"):
             self._expect_exit(["--pin", f"uv={ver}"])
 
+    def test_early_return_modes_are_mutually_exclusive(self):
+        # main() runs only one mode, so a combination must fail loudly rather
+        # than silently skip --audit
+        self._expect_exit(["--list-tools", "--audit"])
+
 
 class TestSelectVersion(unittest.TestCase):
     """The soak / held / --block-major-bumps decision core, fed synthetic
@@ -202,78 +207,6 @@ class TestRedirectAuthStrip(unittest.TestCase):
             self._redirect("https://api.github.com/x", "http://cdn.example.com/y")
 
 
-class TestVersionVar(unittest.TestCase):
-    """version_var() must derive the correct env-var name for each npm tool."""
-
-    def test_claude_code(self):
-        self.assertEqual(up.version_var("claude-code"), "CLAUDE_CODE_VERSION")
-
-    def test_openspec(self):
-        self.assertEqual(up.version_var("openspec"), "OPENSPEC_VERSION")
-
-    def test_pnpm(self):
-        self.assertEqual(up.version_var("pnpm"), "PNPM_VERSION")
-
-
-class TestListNpmTools(unittest.TestCase):
-    """--list-npm-tools / run_list_npm_tools(): TSV output, no network."""
-
-    # The three npm tools expected, in TOOLS order.
-    _NPM_NAMES = ["claude-code", "openspec", "pnpm"]
-
-    def _capture_list(self):
-        """Run run_list_npm_tools(), return (exit_code, stdout_lines)."""
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            rc = up.run_list_npm_tools()
-        return rc, buf.getvalue().splitlines()
-
-    def test_exactly_three_npm_tools_emitted(self):
-        rc, lines = self._capture_list()
-        self.assertEqual(rc, 0)
-        self.assertEqual(len(lines), 3)
-
-    def test_tool_names_are_npm_tools_in_order(self):
-        rc, lines = self._capture_list()
-        self.assertEqual(rc, 0)
-        names = [ln.split("\t")[0] for ln in lines]
-        self.assertEqual(names, self._NPM_NAMES)
-
-    def test_columns_are_correct(self):
-        """Each row must have 5 tab-separated columns with expected values."""
-        rc, lines = self._capture_list()
-        self.assertEqual(rc, 0)
-        for line in lines:
-            cols = line.split("\t")
-            self.assertEqual(len(cols), 5, f"expected 5 columns, got {len(cols)}: {line!r}")
-            name, pkg, env_file, var, ver = cols
-            self.assertEqual(env_file, f"{name}.env")
-            self.assertEqual(var, up.version_var(name))
-            self.assertTrue(ver, f"version must be non-empty for {name}")
-
-    def test_convention_matches_reality_var_in_fragment(self):
-        """version_var(name) must actually be a key in read_fragment(name) for
-        each npm tool — guards against version_var() and fragment_lines() drifting."""
-        for name in self._NPM_NAMES:
-            frag = up.read_fragment(name)
-            var = up.version_var(name)
-            self.assertIn(
-                var, frag,
-                f"{var} not found in pins/{name}.env; version_var() and fragment_lines() have drifted",
-            )
-
-    def test_empty_version_exits_nonzero_without_partial_output(self):
-        """If any tool has no pin, exit non-zero and emit nothing to stdout."""
-        with unittest.mock.patch.object(up, "read_current", return_value=""):
-            buf = io.StringIO()
-            err_buf = io.StringIO()
-            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err_buf):
-                rc = up.run_list_npm_tools()
-            self.assertNotEqual(rc, 0)
-            self.assertEqual(buf.getvalue(), "", "no partial output must appear on stdout")
-            self.assertIn("::error::", err_buf.getvalue())
-
-
 # One recorded sample per tool, carrying the real output shape with a sentinel
 # version substituted. Sentinels, not live versions, so a pin bump doesn't
 # rewrite this table — the shape is what's under test, and CI's runtime check is
@@ -287,6 +220,10 @@ VERSION_OUTPUT_SAMPLES = {
     "glab": f"glab {SENTINEL} (4d7c6cda7)",
     "tfenv": f"tfenv {SENTINEL}",
     "awscli": f"aws-cli/{SENTINEL} Python/3.14.6 Linux/6.8.0 exe/aarch64.ubuntu.26",
+    # `az --version` is a multi-line report; each tool's sample is its own line
+    # of it (the CI stub replays one line per tool).
+    "az": f"azure-cli                         {SENTINEL} *",
+    "azure-devops": f"azure-devops                       {SENTINEL}",
 }
 
 # Constructs Python's re accepts but bash's [[ =~ ]] does not. A rule using one
@@ -357,9 +294,10 @@ class TestListTools(unittest.TestCase):
         self.assertEqual(rc, 0)
         for line, tool in zip(lines, up.TOOLS):
             cols = line.split("\t")
-            self.assertEqual(len(cols), 4, f"expected 4 columns, got {len(cols)}: {line!r}")
-            name, probe, version_re, ver = cols
-            self.assertEqual((name, probe, version_re), (tool.name, tool.probe, tool.version_re))
+            self.assertEqual(len(cols), 6, f"expected 6 columns, got {len(cols)}: {line!r}")
+            name, probe, version_re, ver, kind, ref = cols
+            self.assertEqual((name, probe, version_re, kind, ref),
+                             (tool.name, tool.probe, tool.version_re, tool.kind, tool.ref))
             self.assertEqual(ver, up.read_current(tool.name))
             self.assertTrue(ver, f"version must be non-empty for {name}")
 
@@ -568,6 +506,33 @@ class TestPerToolSoak(unittest.TestCase):
         soak = timedelta(days=up.soak_days_for(self._tool("claude-code"), None))
         r = up.select_version(cand, "2.1.10", soak, now)
         self.assertEqual(r.version, "2.1.11")
+
+
+class TestAzCandidates(unittest.TestCase):
+    """The two az-specific candidate listings — mocked get_json, no network."""
+
+    def test_pypi_drops_yanked_and_empty_releases(self):
+        doc = {"releases": {
+            "2.90.0": [{"upload_time_iso_8601": "2026-09-01T00:00:00Z"}],
+            "2.89.0": [{"upload_time_iso_8601": "2026-08-01T00:00:00Z", "yanked": True}],
+            "2.88.0": [],
+        }}
+        with unittest.mock.patch.object(up, "get_json", return_value=doc):
+            self.assertEqual(up.candidates("pypi", "azure-cli-core"),
+                             [("2.90.0", "2026-09-01T00:00:00Z")])
+
+    def test_azext_reads_the_version_from_the_wheel_not_the_tag(self):
+        rel = [
+            {"tag_name": "20260902.1", "published_at": "2026-09-03T00:00:00Z",
+             "draft": False, "prerelease": False,
+             "assets": [{"name": "azure_devops-1.0.8-py2.py3-none-any.whl"}]},
+            {"tag_name": "20260901.1", "published_at": "2026-09-02T00:00:00Z",
+             "draft": False, "prerelease": True,
+             "assets": [{"name": "azure_devops-1.0.9-py2.py3-none-any.whl"}]},
+        ]
+        with unittest.mock.patch.object(up, "get_json", return_value=rel):
+            self.assertEqual(up.candidates("azext", "Azure/azure-devops-cli-extension"),
+                             [("1.0.8", "2026-09-03T00:00:00Z")])
 
 
 class TestBaseImageCodename(unittest.TestCase):
@@ -784,43 +749,28 @@ class TestPrintReminders(unittest.TestCase):
 
 
 class TestCIVersionCheckStep(unittest.TestCase):
-    """Runs the real shell from ci.yml's runtime version check against a stub
-    `docker`. Nothing else covers this script: action-shellcheck scans .sh files
-    and shebang scripts, not `run:` blocks embedded in workflow YAML."""
+    """Runs scripts/verify-pinned-versions.sh (ci.yml's runtime version check)
+    against a stub `docker`."""
 
-    WORKFLOW = Path(__file__).resolve().parent.parent / ".github/workflows/ci.yml"
-    STEP_NAME = "Smoke test — every pinned CLI reports its pinned version"
-
-    @classmethod
-    def setUpClass(cls):
-        cls.script = cls._extract_run_block()
-
-    @classmethod
-    def _extract_run_block(cls):
-        """Pull the step's `run: |` body out of the workflow and dedent it."""
-        lines = cls.WORKFLOW.read_text().splitlines()
-        start = next(i for i, ln in enumerate(lines) if cls.STEP_NAME in ln)
-        run_at = next(i for i in range(start, len(lines)) if lines[i].strip() == "run: |")
-        body_indent = len(lines[run_at + 1]) - len(lines[run_at + 1].lstrip())
-        body = []
-        for ln in lines[run_at + 1:]:
-            if ln.strip() and len(ln) - len(ln.lstrip()) < body_indent:
-                break
-            body.append(ln[body_indent:] if ln.strip() else "")
-        return "\n".join(body)
+    ROOT = Path(__file__).resolve().parent.parent
+    SCRIPT = str(ROOT / "scripts/verify-pinned-versions.sh")
 
     def _run(self, overrides=None):
         """Execute the step with a stub docker whose per-tool output comes from
         the recorded samples, with `overrides` replacing chosen tools."""
         overrides = overrides or {}
-        rows = []
+        # Tools sharing one probe (az, azure-devops) share one multi-line reply:
+        # their lines are joined with a literal backslash-n that the stub expands.
+        by_exe = {}
         for tool in up.TOOLS:
             exe = tool.probe.split()[0]
             rc, out = overrides.get(
                 tool.name,
                 (0, VERSION_OUTPUT_SAMPLES[tool.name].replace(SENTINEL, up.read_current(tool.name))),
             )
-            rows.append(f"{exe}\t{rc}\t{out}")
+            prev_rc, prev_out = by_exe.get(exe, (0, ""))
+            by_exe[exe] = (rc or prev_rc, f"{prev_out}\\n{out}" if prev_out else out)
+        rows = [f"{exe}\t{rc}\t{out}" for exe, (rc, out) in by_exe.items()]
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
@@ -832,7 +782,7 @@ class TestCIVersionCheckStep(unittest.TestCase):
                 'exe="$4"\n'
                 'while IFS=$\'\\t\' read -r e rc out; do\n'
                 '  if [ "$e" = "$exe" ]; then\n'
-                '    [ -n "$out" ] && printf \'%s\\n\' "$out"\n'
+                '    [ -n "$out" ] && printf \'%b\\n\' "$out"\n'
                 '    exit "$rc"\n'
                 "  fi\n"
                 'done < "$DOCKER_FIXTURE"\n'
@@ -845,7 +795,7 @@ class TestCIVersionCheckStep(unittest.TestCase):
                 "DOCKER_FIXTURE": str(fixture),
             }
             return subprocess.run(
-                ["bash", "-c", self.script], cwd=str(self.WORKFLOW.parents[2]),
+                ["bash", self.SCRIPT], cwd=str(self.ROOT),
                 env=env, capture_output=True, text=True,
             )
 
@@ -897,7 +847,7 @@ class TestCIVersionCheckStep(unittest.TestCase):
             py.chmod(0o755)
             env = {**os.environ, "PATH": f"{tmp}{os.pathsep}{os.environ['PATH']}"}
             res = subprocess.run(
-                ["bash", "-c", self.script], cwd=str(self.WORKFLOW.parents[2]),
+                ["bash", self.SCRIPT], cwd=str(self.ROOT),
                 env=env, capture_output=True, text=True,
             )
         self.assertNotEqual(res.returncode, 0)
